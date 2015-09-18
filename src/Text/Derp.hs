@@ -1,36 +1,42 @@
-{-# LANGUAGE GADTs, RankNTypes #-}
+{-# LANGUAGE GADTs         #-}
+{-# LANGUAGE RankNTypes    #-}
+{-# LANGUAGE UnicodeSyntax #-}
 
-module Text.Derp
-  ( -- * Data Types
-    Parser, Token(..)
-  , -- * Parser construction
-    (<|>), (<~>), (==>), nul, ter, eps, emp
-  , -- * Parser computation steps
-    derive, compact, parseNull
-  , -- * Full parsing and result extraction
-    defaultCompactSteps, compactNum, deriveStepNum, runParseNum
-  , runParseStagesNum, runParseStages
-  , runParseLongestMatchNum, runParseLongestMatch
-  , deriveStep, runParse
-  , -- * Demos
-    xsR, xsL, xsIn, parens, parensIn, amb, ambIn, sexp, sexpIn
-  , someStuff, someStuffG
-  ) where
+-- | Derivative parsing in Haskell
+module DerivativeP ( Parser, Token(..)
+                   , (<|>), (<~>), (==>)
+                   , nul, ter, eps, emp
+                   , derive, compact, parseNull
+                   , defaultCompactSteps, compactNum
+                   , deriveStepNum, runParseNum
+                   , runParseStagesNum, runParseStages
+                   , runParseLongestMatchNum, runParseLongestMatch
+                   , deriveStep, runParse
+                   , xsR, xsL, xsIn, parens, parensIn
+                   , amb, ambIn, sexp, sexpIn
+                   , someStuff, someStuffG
+                   ) where
 
-import Data.Maybe
-import Control.Monad
-import Data.Char
-import Data.Function
-import Data.IORef
-import Data.List
-import Data.Map (Map)
-import System.IO.Unsafe
-import System.Mem.StableName
-import Text.Printf
-import Unsafe.Coerce
-import qualified Data.Map as Map
-import Data.Set (Set)
-import qualified Data.Set as Set
+import           Control.Monad
+import           Control.Monad.State.Lazy
+import           Data.Char
+import           Data.Function
+import           Data.IORef
+import           Data.List
+import           Data.Map                 (Map)
+import qualified Data.Map                 as Map
+import           Data.Maybe
+import           Data.Monoid              ((<>))
+import           Data.Set                 (Set)
+import qualified Data.Set                 as Set
+import           System.IO.Unsafe
+import           System.Mem.StableName
+import           Text.Printf
+import           Unsafe.Coerce
+
+-- | Alias for Set.member
+(∈) :: Ord a => a -> Set a -> Bool
+(∈) = Set.member
 
 -- | Represents both a formal context-free language and the
 --   reduction of a member of that language to a value of type `a'.
@@ -38,22 +44,22 @@ import qualified Data.Set as Set
 --   Languages range of `Token' values.
 
 data Parser t a = Parser
-  { parserRec      :: ParserRec Parser t a
+  { parserRec      :: PRec Parser t a
   , parserNullable :: FPValue Bool
   , parserEmpty    :: FPValue Bool
   , parserDerive   :: Token t -> Parser t a
   , parserCompact  :: Parser t a
   }
 
-data ParserRec p t a where
-  Alt :: (Ord t, Ord a)        => p t a -> p t a -> ParserRec p t a
-  Con :: (Ord t, Ord a, Ord b) => p t a -> p t b -> ParserRec p t (a, b)
-  Red :: (Ord t, Ord a, Ord b) => (Set a -> Set b) -> p t a -> ParserRec p t b
-  Nul :: (Ord t, Ord a)        => p t a -> ParserRec p t a
-  Zip :: (Ord t, Ord a, Ord b) => p t a -> ContextR p t a b -> ParserRec p t b
-  Ter :: (Ord t)               => Set t -> ParserRec p t String
-  Eps :: (Ord t, Ord a)        => Set a -> ParserRec p t a
-  Emp :: (Ord t, Ord a)        => ParserRec p t a
+data PRec p t a where
+  Alt :: (Ord t, Ord a)        => p t a -> p t a            -> PRec p t a
+  Con :: (Ord t, Ord a, Ord b) => p t a -> p t b            -> PRec p t (a, b)
+  Red :: (Ord t, Ord a, Ord b) => (Set a -> Set b) -> p t a -> PRec p t b
+  Nul :: (Ord t, Ord a)        => p t a -> PRec p t a
+  Zip :: (Ord t, Ord a, Ord b) => p t a -> ContextR p t a b -> PRec p t b
+  Ter :: (Ord t)               => Set t -> PRec p t String
+  Eps :: (Ord t, Ord a)        => Set a -> PRec p t a
+  Emp :: (Ord t, Ord a)        => PRec p t a
 
 data ContextR p t a b where
   ConContext :: (Ord t, Ord a, Ord b) => p t b -> ContextR p t (a, b) c -> ContextR p t a c
@@ -77,7 +83,11 @@ data Token t = Token { tokenClass :: t, tokenValue :: String }
 --
 -- > eps "foo"
 
-parser :: (Ord t, Ord a) => ParserRec Parser t a -> FPValue Bool -> FPValue Bool -> Parser t a
+parser :: (Ord t, Ord a)
+       => PRec Parser t a
+       -> FPValue Bool
+       -> FPValue Bool
+       -> Parser t a
 parser p n e = fix $ \ self -> Parser p n e (memoFun (deriveImp self)) (compactImp self)
 
 -- | Alternation.
@@ -146,14 +156,17 @@ derive = parserDerive
 deriveImp :: Parser t a -> Token t -> Parser t a
 deriveImp p' x' = deriveImpRec (parserRec p') x'
   where
-    deriveImpRec (Alt a b) x = derive a x <|> derive b x
-    deriveImpRec (Con a b) x = derive a x <~> b <|> nul a <~> derive b x
-    deriveImpRec (Red f a) x = derive a x ==>| f
-    deriveImpRec (Nul _) _ = emp
-    deriveImpRec (Zip p c) t = pzip (derive p t) c 
-    deriveImpRec (Ter c) (Token x t) | x `Set.member` c = eps t | otherwise = emp
-    deriveImpRec (Eps _) _ = emp
-    deriveImpRec Emp _ = emp
+    deriveImpRec (Alt a b) x                       =     derive a x
+                                                     <|> derive b x
+    deriveImpRec (Con a b) x                       =     derive a x <~> b
+                                                     <|> nul a <~> derive b x
+    deriveImpRec (Red f a) x                       = derive a x ==>| f
+    deriveImpRec (Nul _)   _                       = emp
+    deriveImpRec (Zip p c) t                       = pzip (derive p t) c
+    deriveImpRec (Ter c)   (Token x t) | x ∈ c     = eps t
+                                       | otherwise = emp
+    deriveImpRec (Eps _)   _                       = emp
+    deriveImpRec Emp       _                       = emp
 
 -- | The optimization step of the algorithm.
 
@@ -167,27 +180,27 @@ compactImp p = compactImpRec $ parserRec p
     compactImpRec (Alt (Parser Emp _ _ _ _) b) = compact b
     compactImpRec (Alt a (Parser Emp _ _ _ _)) = compact a
     compactImpRec (Alt (Parser (Eps sM) _ _ _ _) (Parser (Eps tM) _ _ _ _)) = epsM (sM `Set.union` tM)
-    compactImpRec (Alt a b) = (compact a <|> compact b) 
-      { parserNullable = parserNullable a <||> parserNullable b 
+    compactImpRec (Alt a b) = (compact a <|> compact b)
+      { parserNullable = parserNullable a <||> parserNullable b
       , parserEmpty = parserEmpty a <&&> parserEmpty b
       }
     compactImpRec (Con (Parser Emp _ _ _ _) _) = emp
     compactImpRec (Con _ (Parser Emp _ _ _ _)) = emp
     compactImpRec (Con (Parser (Eps sM) _ _ _ _) b) = compact b ==>| (\ xM -> Set.fromList [ (s, x) | s <- Set.toList sM, x <- Set.toList xM ])
     compactImpRec (Con a (Parser (Eps sM) _ _ _ _)) = compact a ==>| (\ xM -> Set.fromList [ (x, s) | x <- Set.toList xM, s <- Set.toList sM ])
-    compactImpRec (Con a b) 
-      | parserNullable a == FPDecided False && parserNullable b == FPDecided False 
-        && parserEmpty a == FPDecided False && parserEmpty b == FPDecided False = 
+    compactImpRec (Con a b)
+      | parserNullable a == FPDecided False && parserNullable b == FPDecided False
+        && parserEmpty a == FPDecided False && parserEmpty b == FPDecided False =
       pzip (compact a) (ConContext (compact b) TopContext)
-    compactImpRec (Con a b) = (compact a <~> compact b) 
-      { parserNullable = parserNullable a <&&> parserNullable b 
+    compactImpRec (Con a b) = (compact a <~> compact b)
+      { parserNullable = parserNullable a <&&> parserNullable b
       , parserEmpty = parserEmpty a <||> parserEmpty b
       }
     compactImpRec (Red _ (Parser Emp _ _ _ _)) = emp
     compactImpRec (Red f (Parser (Eps sM) _ _ _ _)) = epsM (f sM)
     compactImpRec (Red f (Parser (Red g a) _ _ _ _)) = compact a ==>| f . g
-    compactImpRec (Red f a) = (compact a ==>| f) 
-      { parserNullable = parserNullable a 
+    compactImpRec (Red f a) = (compact a ==>| f)
+      { parserNullable = parserNullable a
       , parserEmpty = parserEmpty a
       }
     compactImpRec (Nul (Parser (Con a b) _ _ _ _)) = nul (compact a) <~> nul (compact b)
@@ -270,7 +283,7 @@ deriveStep = deriveStepNum defaultCompactSteps
 --
 -- > Set.fromList ["((1+3)+5)", "(1+(3+5))"]
 --
--- > let e =     ter "num" ==> read 
+-- > let e =     ter "num" ==> read
 -- >         <|> e <~> ter "+" <~> e ==> (\(x1,(_,x2)) -> x1 + x2)
 -- > in runParse e [Token "num" "1", Token "+" "+", Token "num" 3", Token "+" "+", Token "num" "5"]
 --
@@ -331,10 +344,17 @@ genParser p = GenParser $ \ f -> f p
 runGenParser :: (forall t b. Parser t b -> c) -> GenParser -> c
 runGenParser f g = unGenParser g f
 
-data ParserRecType = ConType | AltType | RedType | NulType | ZipType | TerType | EpsType | EmpType
-  deriving (Eq, Ord, Show)
+data PRecType = ConType
+              | AltType
+              | RedType
+              | NulType
+              | ZipType
+              | TerType
+              | EpsType
+              | EmpType
+              deriving (Eq, Ord, Show)
 
-parserType :: Parser t a -> ParserRecType
+parserType :: Parser t a -> PRecType
 parserType = parserRecType . parserRec
   where
     parserRecType (Con _ _) = ConType
@@ -346,8 +366,8 @@ parserType = parserRecType . parserRec
     parserRecType (Eps _)   = EpsType
     parserRecType Emp       = EmpType
 
-type ParserInspect b =  (forall t a. Parser t a -> IO Integer) 
-                     -> (forall t a. Parser t a -> IO Bool) 
+type ParserInspect b =  (forall t a. Parser t a -> IO Integer)
+                     -> (forall t a. Parser t a -> IO Bool)
                      -> (forall t a. Parser t a -> IO b)
 
 inspectParser :: ParserInspect b -> Parser t a -> b
@@ -357,11 +377,11 @@ inspectParser f p = unsafePerformIO $ do
   uidPt     <- newIORef 1
   f (lookupId reifiedPt uidPt) (seenId seenPt) p
 
-lookupId :: IORef (Map Int [(StableName (), Integer)]) 
-         -> IORef Integer 
-         -> Parser t a 
+lookupId :: IORef (Map Int [(StableName (), Integer)])
+         -> IORef Integer
+         -> Parser t a
          -> IO Integer
-lookupId reifiedPt uidPt p 
+lookupId reifiedPt uidPt p
   | p `seq` True = do
     stblName <- genericStableName p
     let stblNameHashed = hashStableName stblName
@@ -376,8 +396,8 @@ lookupId reifiedPt uidPt p
   | otherwise = error "seq failed"
 
 seenId :: IORef (Map Int [(StableName (), ())]) -> Parser t a -> IO Bool
-seenId seenPt p 
-  | p `seq` True = do 
+seenId seenPt p
+  | p `seq` True = do
     stblName <- genericStableName p
     let stblNameHashed = hashStableName stblName
     lookupValM <- liftM (extraLookup stblNameHashed stblName) $ readIORef seenPt
@@ -415,11 +435,11 @@ inspectf f i uidM isSeenM p = do
     let next = f i p uid (fromIntegral pid) cuids
     foldlParserChildrenM (\t p' -> inspectf f t uidM isSeenM p') next p
 
-data ParserInfo = ParserInfo Integer -- uid
-                             Integer -- pid
-                             ParserRecType -- type
+data ParserInfo = ParserInfo Integer        -- uid
+                             Integer        -- pid
+                             PRecType       -- type
                              (FPValue Bool) -- nullable
-                             [Integer] -- children
+                             [Integer]      -- children
 
 parserToGraph :: Parser t a -> [ParserInfo]
 parserToGraph = reverse . parserDeepFoldL f []
@@ -436,8 +456,8 @@ showParserGraph :: [ParserInfo] -> String
 showParserGraph ps = printf "SIZE: %s \n" (show (length ps)) ++ intercalate "\n" (map showParserGraphSingle ps)
   where
     showParserGraphSingle :: ParserInfo -> String
-    showParserGraphSingle (ParserInfo uid pid ptype n children) = 
-      printf "%-6s%-6s%-10s%-10s%-10s" 
+    showParserGraphSingle (ParserInfo uid pid ptype n children) =
+      printf "%-6s%-6s%-10s%-10s%-10s"
              (show uid)
              (show pid)
              (show ptype)
@@ -456,19 +476,19 @@ instance Show (Parser t a) where
 -- FPValue
 
 data FPValue a = FPDecided a | FPUndecided
-  deriving (Eq, Ord, Show)
+               deriving (Eq, Ord, Show)
 
 showFPBool :: FPValue Bool -> String
-showFPBool (FPDecided True) = "True"
+showFPBool (FPDecided True)  = "True"
 showFPBool (FPDecided False) = "False"
-showFPBool FPUndecided = "Undecided"
+showFPBool FPUndecided       = "Undecided"
 
 (<&&>) :: FPValue Bool -> FPValue Bool -> FPValue Bool
-(<&&>) (FPDecided False) _ = FPDecided False
-(<&&>) _ (FPDecided False) = FPDecided False
-(<&&>) FPUndecided _ = FPUndecided
-(<&&>) _ FPUndecided = FPUndecided
-(<&&>) (FPDecided x) (FPDecided y) = FPDecided (x && y)
+(<&&>) (FPDecided False) _                 = FPDecided False
+(<&&>) _                 (FPDecided False) = FPDecided False
+(<&&>) FPUndecided       _                 = FPUndecided
+(<&&>) _                 FPUndecided       = FPUndecided
+(<&&>) (FPDecided x)     (FPDecided y)     = FPDecided (x && y)
 
 (<||>) :: FPValue Bool -> FPValue Bool -> FPValue Bool
 (<||>) (FPDecided True) _ = FPDecided True
@@ -484,55 +504,64 @@ memoFun :: (Ord a) => (a -> b) -> a -> b
 memoFun f = unsafePerformIO $ do
   mapRef <- newIORef Map.empty
   return $ \a -> unsafePerformIO $ do
-  currMap <- readIORef mapRef
-  let vM = Map.lookup a currMap
-  case vM of
-    Just b -> return b
-    Nothing -> do
-      let b = f a
-      writeIORef mapRef $ Map.insert a b currMap
-      return b
+    currMap <- readIORef mapRef
+    case Map.lookup a currMap of
+      Just b -> return b
+      Nothing -> do
+        let b = f a
+        writeIORef mapRef $ Map.insert a b currMap
+        return b
 
 -- demos
 
+-- | docstring
 xsR :: () -> Parser String String
 xsR () = p
   where
     p = eps "" <|> ter "x" <~> p ==> uncurry (++)
 
+-- | docstring
 xsL :: () -> Parser String String
 xsL () = p
   where
     p = eps "" <|> p <~> ter "x" ==> uncurry (++)
 
+-- | docstring
 xsIn :: [Token String]
 xsIn = replicate 60 (Token "x" "x")
 
+-- | docstring
 parens :: () -> Parser String String
 parens () = p
   where
     p = eps "" <|> ter "(" <~> p <~> ter ")" ==> (\(s1,(s2,s3)) -> s1 ++ s2 ++ s3)
 
+-- | docstring
 parensIn :: [Token String]
 parensIn = replicate 80 (Token "(" "(") ++ replicate 80 (Token ")" ")")
 
+-- | docstring
 amb :: () -> Parser String String
 amb () = p
   where
     p = ter "1" <|> p <~> ter "+" <~> p ==> (\(s1,(s2,s3)) -> "(" ++ s1 ++ s2 ++ s3 ++ ")")
 
+-- | docstring
 ambIn :: [Token String]
 ambIn = intersperse (Token "+" "+") (replicate 7 (Token "1" "1"))
 
+-- | docstring
 sexp :: () -> Parser String String
 sexp () = p
   where
     p = ter "(" <~> pl <~> ter ")" ==> (\(s1,(s2,s3)) -> s1 ++ s2 ++ s3) <|> ter "s"
     pl = pl <~> p ==> uncurry (++) <|> eps ""
 
+-- | docstring
 sexpIn :: [Token String]
 sexpIn = map (\x -> Token x x) $ words "( s ( s ( s s ( s s s ( s s s ( s ) ( s s ) s s ) s s ) s ) s ) )"
 
+-- | docstring
 makeSExpIn :: Int -> [Token String]
 makeSExpIn n = map (\x -> Token x x) . words $ "( " ++ build n "s" ++ " )"
   where
@@ -541,64 +570,78 @@ makeSExpIn n = map (\x -> Token x x) . words $ "( " ++ build n "s" ++ " )"
       where
         s' = "s ( " ++ s ++ " )"
 
+-- | docstring
 someStuff :: [Token String]
 someStuff = map (\x -> Token x x) $ words "x x x x y y y x x"
 
+-- | docstring
 someStuffG :: () -> Parser String String
 someStuffG () = p
   where
     p = eps "" <|> p <~> ter "x" ==> uncurry (++)
 
-
+-- | docstring
 nilsE :: () -> Parser String ()
 nilsE () = expr
-  where 
+  where
     expr = op <|> atom
     op = expr <~> internal ==> const ()
     atom = ter "x" ==> const ()
     internal = ter "[" <~> expr <~> ter "]" ==> const ()
-      
 
+-- | docstring
 exprIn :: Int -> [String]
 exprIn n =
   foldr (.) id
         (replicate n (\s -> ("x" :) . ("[" :) . s . ("]" :)))
-        ("x" :) 
+        ("x" :)
         []
 
+-- | docstring
 exprIn2 :: [String]
 exprIn2 = words "x [ x ] [ x ]"
 
 -- lexing
 
-stepParsers :: (Ord t, Ord a) => [Parser t a] -> [Token t] -> [(Int, Set a, [Token t])]
-stepParsers ps ts = catMaybes $ map (flip runParseLongestMatch ts) ps
+-- | docstring
+stepParsers :: (Ord t, Ord a)
+            => [Parser t a]              -- ^ docstring
+            -> [Token t]                 -- ^ docstring
+            -> [(Int, Set a, [Token t])] -- ^ docstring
+stepParsers ps ts = mapMaybe (`runParseLongestMatch` ts) ps
 
-longestFirstMatch :: [(Int, Set a, [Token t])] -> Maybe (a, [Token t])
-longestFirstMatch rs = fmap extract $ foldl pick Nothing rs
+-- | docstring
+longestFirstMatch :: [(Int, Set a, [Token t])] -- ^ docstring
+                  -> Maybe (a, [Token t])      -- ^ docstring
+longestFirstMatch rs = extract <$> foldl pick Nothing rs
   where
     pick Nothing s = Just s
     pick tM@(Just (tlen, _, _)) c@(clen, _, _) | clen > tlen = Just c
                                                | otherwise   = tM
-    extract (_, res, con) = (Set.toList res !! 0, con)
+    extract (_, res, con) = (head $ Set.toList res, con)
 
-fullLex :: (Show t, Ord t, Ord a) => [Parser t a] -> [Token t] -> Either String [a]
+-- | docstring
+fullLex :: (Show t, Ord t, Ord a)
+        => [Parser t a]      -- ^ docstring
+        -> [Token t]         -- ^ docstring
+        -> Either String [a] -- ^ docstring
 fullLex ps [] = Right []
 fullLex ps ts = case longestFirstMatch (stepParsers ps ts) of
   Nothing -> Left $ printf "cannot parse: %s" (show ts)
-  Just (r, ts') -> fmap (r :) $ fullLex ps ts'
-                    
+  Just (r, ts') -> (r :) <$> fullLex ps ts'
+
+-- | Make a token from a character
 charToken :: Char -> Token Char
 charToken c = Token c [c]
 
--- sizes
-
+-- | Report sizes
 reportSizes :: Parser t a -> [Token t] -> String
-reportSizes = reportSizesN 0
-
-reportSizesN :: Int -> Parser t a -> [Token t] -> String
-reportSizesN _ _ [] = ""
-reportSizesN n p (i:is) = printf "%3s :: %s\n" (show n) (show size) ++ reportSizesN (n + 1) p' is
+reportSizes p ts = snd $ execState (mapM_ (go p) ts) (0, "")
   where
-    p' = deriveStep p i
-    size = parserSize p'
+    go :: Parser t a -> Token t -> State (Int, String) ()
+    go p t = do
+      (i, s) <- get
+      let p' = deriveStep p t
+      let si = show i
+      let ss = show $ parserSize p'
+      put $ (i + 1, s <> printf "%3s :: %s\n" si ss)
