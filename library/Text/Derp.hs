@@ -3,19 +3,19 @@
 {-# LANGUAGE UnicodeSyntax #-}
 
 -- | Derivative parsing in Haskell
-module DerivativeP ( Parser, Token(..)
-                   , (<|>), (<~>), (==>)
-                   , nul, ter, eps, emp
-                   , derive, compact, parseNull
-                   , defaultCompactSteps, compactNum
-                   , deriveStepNum, runParseNum
-                   , runParseStagesNum, runParseStages
-                   , runParseLongestMatchNum, runParseLongestMatch
-                   , deriveStep, runParse
-                   , xsR, xsL, xsIn, parens, parensIn
-                   , amb, ambIn, sexp, sexpIn
-                   , someStuff, someStuffG
-                   ) where
+module Text.Derp ( Parser, Token(..)
+                 , (<|>), (<~>), (==>)
+                 , nul, ter, eps, emp
+                 , derive, compact, parseNull
+                 , defaultCompactSteps, compactNum
+                 , deriveStepNum, runParseNum
+                 , runParseStagesNum, runParseStages
+                 , runParseLongestMatchNum, runParseLongestMatch
+                 , deriveStep, runParse
+                 , xsR, xsL, xsIn, parens, parensIn
+                 , amb, ambIn, sexp, sexpIn
+                 , someStuff, someStuffG
+                 ) where
 
 import           Control.Monad
 import           Control.Monad.State.Lazy
