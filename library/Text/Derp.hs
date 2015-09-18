@@ -19,20 +19,22 @@ module Text.Derp ( Parser, Token(..)
 
 import           Control.Monad
 import           Control.Monad.State.Lazy
-import           Data.Char
-import           Data.Function
-import           Data.IORef
+
 import           Data.List
-import           Data.Map                 (Map)
-import qualified Data.Map                 as Map
 import           Data.Maybe
 import           Data.Monoid              ((<>))
+
+import           Data.Map                 (Map)
+import qualified Data.Map                 as Map
 import           Data.Set                 (Set)
 import qualified Data.Set                 as Set
+
+import           Data.IORef
 import           System.IO.Unsafe
+import           Unsafe.Coerce
+
 import           System.Mem.StableName
 import           Text.Printf
-import           Unsafe.Coerce
 
 -- | Alias for Set.member
 (∈) :: Ord a => a -> Set a -> Bool
